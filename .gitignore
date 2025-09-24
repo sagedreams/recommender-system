@@ -48,13 +48,17 @@ Thumbs.db
 
 # Data Files (CRITICAL - Do not commit data)
 *.csv
-*.json
 *.parquet
 *.pickle
 *.pkl
 data/
 datasets/
 raw_data/
+
+# JSON files (except Postman collections)
+*.json
+!postman_collection.json
+!postman_environment.json
 
 # Logs and Audit Files
 logs/
