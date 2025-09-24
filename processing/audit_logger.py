@@ -105,6 +105,12 @@ class AuditLogger:
         self.processing_stats["unique_orders"] = total_orders
         self.logger.info(f"Total unique orders: {total_orders}")
     
+    def log_embedding_stats(self, total_embeddings: int, embedding_dimension: int):
+        """Log embedding generation statistics"""
+        self.processing_stats["total_embeddings"] = total_embeddings
+        self.processing_stats["embedding_dimension"] = embedding_dimension
+        self.logger.info(f"Generated embeddings: {total_embeddings} items with {embedding_dimension} dimensions")
+    
     def end_processing(self):
         """Log end of data processing and generate summary"""
         self.processing_stats["end_time"] = datetime.utcnow().isoformat()

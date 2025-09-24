@@ -10,6 +10,11 @@ scikit-learn>=1.4.0
 # Redis and Vector Operations
 redis>=5.0.1
 
+# Vector Embeddings and ML
+sentence-transformers>=2.2.0
+transformers>=4.30.0
+torch>=2.0.0
+
 # HTTP Client
 httpx>=0.25.2
 

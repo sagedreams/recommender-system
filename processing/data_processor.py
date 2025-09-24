@@ -4,22 +4,37 @@ Data processing pipeline for the recommender system
 import pandas as pd
 import numpy as np
 from collections import defaultdict, Counter
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import logging
-from audit_logger import AuditLogger
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'api'))
+from processing.audit_logger import AuditLogger
+from api.app.services.embedding_service import EmbeddingService
+from api.app.services.huggingface_embedding_service import HuggingFaceEmbeddingService
 
 logger = logging.getLogger(__name__)
 
 class DataProcessor:
     """Process CSV data for recommendation system"""
     
-    def __init__(self, csv_file_path: str):
+    def __init__(self, csv_file_path: str, embedding_dimension: int = 128, use_huggingface: bool = True, huggingface_model: str = "all-minilm"):
         self.csv_file_path = csv_file_path
         self.df = None
         self.item_cooccurrence = defaultdict(lambda: defaultdict(int))
         self.item_frequency = Counter()
         self.order_items = defaultdict(list)
         self.audit_logger = AuditLogger()
+        
+        # Choose embedding service
+        if use_huggingface:
+            self.embedding_service = HuggingFaceEmbeddingService(huggingface_model)
+            self.use_huggingface = True
+        else:
+            self.embedding_service = EmbeddingService(embedding_dimension)
+            self.use_huggingface = False
+            
+        self.item_embeddings: Dict[str, List[float]] = {}
         
     def load_data(self) -> pd.DataFrame:
         """Load and clean the CSV data"""
@@ -207,6 +222,51 @@ class DataProcessor:
             self.audit_logger.log_record_error({"operation": "summary_stats"}, str(e))
             return {}
     
+    def generate_embeddings(self):
+        """Generate vector embeddings for all items"""
+        try:
+            logger.info("Generating vector embeddings...")
+            
+            if self.use_huggingface:
+                # Use HuggingFace text embeddings
+                unique_items = list(self.item_frequency.keys())
+                logger.info(f"Generating HuggingFace embeddings for {len(unique_items)} unique items...")
+                self.item_embeddings = self.embedding_service.generate_item_embeddings(unique_items)
+                embedding_dim = self.embedding_service.get_embedding_dimension()
+            else:
+                # Use SVD on co-occurrence matrix
+                cooccurrence_matrix = self.embedding_service.build_cooccurrence_matrix(self.item_cooccurrence)
+                self.item_embeddings = self.embedding_service.generate_embeddings(cooccurrence_matrix)
+                embedding_dim = self.embedding_service.embedding_dimension
+            
+            logger.info(f"Generated embeddings for {len(self.item_embeddings)} items")
+            self.audit_logger.log_embedding_stats(len(self.item_embeddings), embedding_dim)
+            
+        except Exception as e:
+            logger.error(f"Error generating embeddings: {e}")
+            self.audit_logger.log_record_error({"operation": "embedding_generation"}, str(e))
+            raise
+    
+    def get_item_embedding(self, item_name: str) -> Optional[List[float]]:
+        """Get embedding vector for a specific item"""
+        return self.embedding_service.get_item_embedding(item_name)
+    
+    def find_similar_items_vector(self, item_name: str, limit: int = 10) -> List[Tuple[str, float]]:
+        """Find similar items using vector embeddings"""
+        return self.embedding_service.find_similar_items(item_name, limit)
+    
+    def save_embeddings(self, filepath: str = "item_embeddings.pkl"):
+        """Save embeddings to file"""
+        self.embedding_service.save_embeddings(filepath)
+    
+    def load_embeddings(self, filepath: str = "item_embeddings.pkl"):
+        """Load embeddings from file"""
+        self.embedding_service.load_embeddings(filepath)
+        # Update local embeddings dict
+        self.item_embeddings = {
+            k: v.tolist() for k, v in self.embedding_service.item_embeddings.items()
+        }
+
     def save_audit_report(self, filename: str = None):
         """Save audit report"""
         return self.audit_logger.save_audit_report(filename)
@@ -219,6 +279,9 @@ def main():
         # Load and process data
         df = processor.load_data()
         processor.build_cooccurrence_matrix()
+        
+        # Generate vector embeddings
+        processor.generate_embeddings()
         
         # Generate summary
         stats = processor.generate_summary_stats()
