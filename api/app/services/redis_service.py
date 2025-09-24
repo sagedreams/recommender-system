@@ -252,14 +252,15 @@ class RedisService:
                 if item_name != target_item:
                     similarity = self._calculate_cosine_similarity(target_embedding, item_data["embedding"])
                     similarities.append({
-                        "item": item_name,
-                        "similarity": similarity,
+                        "item_name": item_name,
+                        "similarity_score": similarity,
+                        "reason": f"{embedding_type.title()} similarity: {similarity:.3f}",
                         "metadata": item_data["metadata"],
                         "embedding_type": embedding_type
                     })
             
             # Sort by similarity and return top results
-            similarities.sort(key=lambda x: x["similarity"], reverse=True)
+            similarities.sort(key=lambda x: x["similarity_score"], reverse=True)
             return similarities[:limit]
             
         except Exception as e:
@@ -288,6 +289,34 @@ class RedisService:
         except Exception as e:
             logger.error(f"Error calculating cosine similarity: {e}")
             return 0.0
+
+    async def get_similar_items_simple(self, item_name: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Retrieve similar items from simple co-occurrence data"""
+        try:
+            key = f"cooccurrence:{item_name}"
+            data = await self.redis_client.get(key)
+            if data:
+                # Parse the stored dictionary string
+                cooccurrence_data = eval(data)  # Simple eval for stored dict
+                similar_items = cooccurrence_data.get("similar_items", [])
+                return similar_items[:limit]
+            return []
+        except Exception as e:
+            logger.error(f"Failed to retrieve similar items for {item_name}: {e}")
+            return []
+    
+    async def get_popular_items_simple(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Retrieve popular items from simple frequency data"""
+        try:
+            data = await self.redis_client.get("popular_items")
+            if data:
+                popular_data = eval(data)  # Simple eval for stored dict
+                items = popular_data.get("items", [])
+                return items[:limit]
+            return []
+        except Exception as e:
+            logger.error(f"Failed to retrieve popular items: {e}")
+            return []
 
     async def health_check(self) -> bool:
         """Check Redis connection health"""

@@ -49,13 +49,17 @@ async def get_order_recommendations(
 async def get_similar_items(
     item_name: str,
     limit: int = Query(5, ge=1, le=20),
-    embedding_type: str = Query("cooccurrence", description="Embedding type: 'cooccurrence' or 'huggingface'"),
+    embedding_type: str = Query("cooccurrence", description="Embedding type: 'simple', 'cooccurrence', 'huggingface', or 'unified'"),
     recommendation_service: RecommendationService = Depends(get_recommendation_service)
 ):
     """Find items similar to a given item using different embedding approaches"""
     try:
         # Use the embedding_type parameter to determine which approach to use
-        if embedding_type == "huggingface":
+        if embedding_type == "simple":
+            # Use simple co-occurrence counting
+            recommendations = await recommendation_service.simple_cooccurrence_service.get_similar_items(item_name, limit)
+            
+        elif embedding_type == "huggingface":
             # Use HuggingFace embeddings
             similar_data = await recommendation_service.redis_service.find_similar_items_by_embedding(
                 item_name, limit, embedding_type="huggingface"
@@ -64,28 +68,28 @@ async def get_similar_items(
             recommendations = []
             for item_data in similar_data:
                 recommendations.append(RecommendationItem(
-                    item_name=item_data["item"],
-                    similarity_score=item_data["similarity"],
-                    reason=f"HuggingFace similarity: {item_data['similarity']:.3f}",
+                    item_name=item_data["item_name"],
+                    similarity_score=item_data["similarity_score"],
+                    reason=item_data["reason"],
                     popularity_rank=None
                 ))
+                
+        elif embedding_type == "unified":
+            # Use unified approach combining all three methods
+            recommendations = await recommendation_service.get_similar_items_unified(item_name, limit)
+            
         else:
-            # Use co-occurrence based similarity (default)
-            similar_data = await recommendation_service.redis_service.get_similar_items(item_name, limit)
+            # Use SVD-based co-occurrence embeddings (default)
+            similar_data = await recommendation_service.redis_service.find_similar_items_by_embedding(
+                item_name, limit, embedding_type="cooccurrence"
+            )
             
             recommendations = []
             for item_data in similar_data:
-                similar_item = item_data.get("item", "")
-                cooccurrence = item_data.get("cooccurrence", 0)
-                
-                # Calculate similarity score based on co-occurrence frequency
-                max_cooccurrence = 17951  # From our data analysis
-                similarity_score = min(cooccurrence / max_cooccurrence, 1.0)
-                
                 recommendations.append(RecommendationItem(
-                    item_name=similar_item,
-                    similarity_score=similarity_score,
-                    reason=f"Co-occurrence similarity ({cooccurrence} times)",
+                    item_name=item_data["item_name"],
+                    similarity_score=item_data["similarity_score"],
+                    reason=item_data["reason"],
                     popularity_rank=None
                 ))
         
@@ -147,7 +151,7 @@ async def get_popular_items(
 @router.get("/embeddings/{item_name}")
 async def get_item_embedding(
     item_name: str,
-    embedding_type: str = Query("cooccurrence", description="Embedding type: 'cooccurrence' or 'huggingface'"),
+    embedding_type: str = Query("cooccurrence", description="Embedding type: 'simple', 'cooccurrence', or 'huggingface'"),
     redis_service: RedisService = Depends(get_redis_service)
 ):
     """Get vector embedding for a specific item"""

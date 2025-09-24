@@ -1,5 +1,5 @@
 """
-Recommendation service with HuggingFace embeddings
+Recommendation service with multiple approaches: HuggingFace, SVD, and Simple Co-occurrence
 """
 import logging
 import math
@@ -7,16 +7,18 @@ from typing import List, Dict, Any, Optional
 from ..models.recommendation import RecommendationItem
 from .redis_service import RedisService
 from .huggingface_embedding_service import HuggingFaceEmbeddingService
+from .simple_cooccurrence_service import SimpleCooccurrenceService
 
 logger = logging.getLogger(__name__)
 
 class RecommendationService:
-    """Service for generating recommendations using HuggingFace embeddings"""
+    """Service for generating recommendations using multiple approaches"""
     
     def __init__(self, redis_service: RedisService, huggingface_model: str = "all-minilm"):
         self.redis_service = redis_service
         self.huggingface_model = huggingface_model
         self.embedding_service: Optional[HuggingFaceEmbeddingService] = None
+        self.simple_cooccurrence_service = SimpleCooccurrenceService(redis_service)
         self.item_embeddings: Dict[str, List[float]] = {}
         
     async def initialize_embeddings(self):
@@ -193,6 +195,134 @@ class RecommendationService:
             
         except Exception as e:
             logger.error(f"Error finding items similar to embedding: {e}")
+            return []
+
+    async def get_similar_items_unified(self, item_name: str, limit: int = 5) -> List[RecommendationItem]:
+        """Get recommendations from all three approaches and create a unified ranking"""
+        try:
+            # Get recommendations from all three approaches
+            simple_recs = await self.simple_cooccurrence_service.get_similar_items(item_name, limit)
+            svd_recs = await self.redis_service.find_similar_items_by_embedding(item_name, limit, "cooccurrence")
+            hf_recs = await self.redis_service.find_similar_items_by_embedding(item_name, limit, "huggingface")
+            
+            # Convert Redis results to RecommendationItem format
+            svd_recommendations = []
+            for rec in svd_recs:
+                svd_recommendations.append(RecommendationItem(
+                    item_name=rec["item_name"],
+                    similarity_score=rec["similarity_score"],
+                    reason=rec["reason"],
+                    popularity_rank=None
+                ))
+            
+            hf_recommendations = []
+            for rec in hf_recs:
+                hf_recommendations.append(RecommendationItem(
+                    item_name=rec["item_name"],
+                    similarity_score=rec["similarity_score"],
+                    reason=rec["reason"],
+                    popularity_rank=None
+                ))
+            
+            # Create unified recommendations with weighted scoring
+            unified_recs = self._create_unified_recommendations(
+                simple_recs, svd_recommendations, hf_recommendations, limit
+            )
+            
+            return unified_recs
+            
+        except Exception as e:
+            logger.error(f"Error getting unified similar items: {e}")
+            return []
+    
+    def _create_unified_recommendations(self, simple_recs: List[RecommendationItem], 
+                                      svd_recs: List[RecommendationItem], 
+                                      hf_recs: List[RecommendationItem], 
+                                      limit: int) -> List[RecommendationItem]:
+        """Create unified recommendations by combining and ranking all approaches"""
+        try:
+            # Collect all unique items with their scores from different approaches
+            item_scores = {}
+            
+            # Weight different approaches (can be tuned based on performance)
+            weights = {
+                'simple': 0.3,    # Simple co-occurrence
+                'svd': 0.4,       # SVD embeddings (co-occurrence based)
+                'huggingface': 0.3  # HuggingFace semantic embeddings
+            }
+            
+            # Process simple co-occurrence recommendations
+            for rec in simple_recs:
+                item_name = rec.item_name
+                if item_name not in item_scores:
+                    item_scores[item_name] = {
+                        'simple': 0.0,
+                        'svd': 0.0,
+                        'huggingface': 0.0,
+                        'reasons': []
+                    }
+                item_scores[item_name]['simple'] = rec.similarity_score
+                item_scores[item_name]['reasons'].append(f"Simple: {rec.reason}")
+            
+            # Process SVD recommendations
+            for rec in svd_recs:
+                item_name = rec.item_name
+                if item_name not in item_scores:
+                    item_scores[item_name] = {
+                        'simple': 0.0,
+                        'svd': 0.0,
+                        'huggingface': 0.0,
+                        'reasons': []
+                    }
+                item_scores[item_name]['svd'] = rec.similarity_score
+                item_scores[item_name]['reasons'].append(f"SVD: {rec.reason}")
+            
+            # Process HuggingFace recommendations
+            for rec in hf_recs:
+                item_name = rec.item_name
+                if item_name not in item_scores:
+                    item_scores[item_name] = {
+                        'simple': 0.0,
+                        'svd': 0.0,
+                        'huggingface': 0.0,
+                        'reasons': []
+                    }
+                item_scores[item_name]['huggingface'] = rec.similarity_score
+                item_scores[item_name]['reasons'].append(f"HF: {rec.reason}")
+            
+            # Calculate unified scores
+            unified_recommendations = []
+            for item_name, scores in item_scores.items():
+                # Calculate weighted average score
+                unified_score = (
+                    scores['simple'] * weights['simple'] +
+                    scores['svd'] * weights['svd'] +
+                    scores['huggingface'] * weights['huggingface']
+                )
+                
+                # Count how many approaches found this item
+                approach_count = sum(1 for score in [scores['simple'], scores['svd'], scores['huggingface']] if score > 0)
+                
+                # Boost score if multiple approaches agree
+                consensus_boost = 1.0 + (approach_count - 1) * 0.1
+                final_score = unified_score * consensus_boost
+                
+                # Create combined reason
+                combined_reason = " | ".join(scores['reasons'])
+                
+                unified_recommendations.append(RecommendationItem(
+                    item_name=item_name,
+                    similarity_score=final_score,
+                    reason=f"Unified ({approach_count}/3 approaches): {combined_reason}",
+                    popularity_rank=None
+                ))
+            
+            # Sort by unified score and return top results
+            unified_recommendations.sort(key=lambda x: x.similarity_score, reverse=True)
+            return unified_recommendations[:limit]
+            
+        except Exception as e:
+            logger.error(f"Error creating unified recommendations: {e}")
             return []
 
     def calculate_cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
